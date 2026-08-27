@@ -4,7 +4,9 @@ class APIError(Exception):
         self.value = value
 
     def __str__(self):
-        return self.value
+        # Make sure the exception can always be printed, even if the API
+        # returned a non-string value for the error message.
+        return str(self.value)
 
 
 class APITimeout(APIError):

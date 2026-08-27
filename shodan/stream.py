@@ -1,6 +1,7 @@
 import requests
 import json
 import ssl
+import time
 
 from .exception import APIError
 
@@ -44,8 +45,12 @@ class Stream:
                 #
                 # We only want to exit if there was a timeout specified or the HTTP status code is
                 # not specific to Cloudflare.
-                if req.status_code != 524 or timeout >= 0:
+                if req.status_code != 524 or (timeout is not None and timeout >= 0):
                     break
+
+                # The Cloudflare connection timed out because no data was flowing - wait a moment
+                # before reconnecting so we don't hammer the streaming API.
+                time.sleep(1)
         except Exception:
             raise APIError('Unable to contact the Shodan Streaming API')
 

@@ -1,6 +1,16 @@
 CHANGELOG
 =========
 
+1.32.0
+------
+* Automatic retries with backoff for transient errors (connection failures, server errors and rate limiting)
+* Honor the "Retry-After" header when the API returns a 429 rate limit response
+* Return meaningful error messages for unexpected HTTP status codes instead of a generic "Unable to parse JSON" error
+* New options for the Shodan() class: ``retries`` and ``timeout``
+* New API methods: ``Shodan.account_profile()`` and ``Shodan.dns.reverse_lookup()``
+* Fix a possible TypeError in the Streaming API when a Cloudflare timeout (524) occurred and no timeout was specified
+
+
 1.28.0
 ------
 * Add the ability to whitelist a specific vulnerability in Shodan Monitor instead of whitelisting the while IP:port

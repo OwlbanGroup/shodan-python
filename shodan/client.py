@@ -83,6 +83,20 @@ class Shodan:
                 args['type'] = type
             return self.parent._request('/dns/domain/{}'.format(domain), args)
 
+        def reverse_lookup(self, ips):
+            """Get the hostnames that point to the given IP addresses.
+
+            :param ips: A list of IP addresses or a single IP address as a string
+            :type ips: str or list
+
+            :returns: A dictionary where the keys are the IP addresses and the values are lists of hostnames
+            """
+            if isinstance(ips, basestring):
+                ips = [ips]
+            return self.parent._request('/dns/reverse', {
+                'ips': ','.join(ips),
+            })
+
     class Notifier:
 
         def __init__(self, parent):
@@ -291,13 +305,17 @@ class Shodan:
             """
             return self.parent._request('/api/v1/search/filters', {}, service='trends')
 
-    def __init__(self, key, proxies=None):
+    def __init__(self, key, proxies=None, retries=3, timeout=None):
         """Initializes the API object.
 
         :param key: The Shodan API key.
         :type key: str
         :param proxies: A proxies array for the requests library, e.g. {'https': 'your proxy'}
         :type proxies: dict
+        :param retries: Number of times to retry a request if it fails due to a transient error (connection issues, server errors, rate limiting).
+        :type retries: int
+        :param timeout: Optional timeout (in seconds) for the underlying HTTP requests. None waits forever.
+        :type timeout: int or None
         """
         self.api_key = key
         self.base_url = 'https://api.shodan.io'
@@ -315,6 +333,8 @@ class Shodan:
         self._session = requests.Session()
         self.api_rate_limit = 1  # Requests per second
         self._api_query_time = None
+        self.retries = retries
+        self.timeout = timeout
 
         if proxies:
             self._session.proxies.update(proxies)
@@ -349,26 +369,55 @@ class Shodan:
             while (1.0 / self.api_rate_limit) + self._api_query_time >= time.time():
                 time.sleep(0.1 / self.api_rate_limit)
 
-        # Send the request
-        try:
-            method = method.lower()
-            if method == 'post':
-                if json_data:
-                    data = self._session.post(base_url + function, params=params,
-                                            data=json.dumps(json_data),
-                                            headers={'content-type': 'application/json'},
+        # Send the request - automatically retry transient failures such as connection
+        # issues, server errors (5xx) and rate limiting (429).
+        tries = 0
+        while True:
+            try:
+                method = method.lower()
+                if method == 'post':
+                    if json_data:
+                        data = self._session.post(base_url + function, params=params,
+                                                data=json.dumps(json_data),
+                                                headers={'content-type': 'application/json'},
+                                                timeout=self.timeout,
                         )
+                    else:
+                        data = self._session.post(base_url + function, params, timeout=self.timeout)
+                elif method == 'put':
+                    data = self._session.put(base_url + function, params=params, timeout=self.timeout)
+                elif method == 'delete':
+                    data = self._session.delete(base_url + function, params=params, timeout=self.timeout)
                 else:
-                    data = self._session.post(base_url + function, params)
-            elif method == 'put':
-                data = self._session.put(base_url + function, params=params)
-            elif method == 'delete':
-                data = self._session.delete(base_url + function, params=params)
-            else:
-                data = self._session.get(base_url + function, params=params)
-            self._api_query_time = time.time()
-        except Exception:
-            raise APIError('Unable to connect to Shodan')
+                    data = self._session.get(base_url + function, params=params, timeout=self.timeout)
+                self._api_query_time = time.time()
+            except Exception:
+                # The connection couldn't be established - try again if there are
+                # attempts left, otherwise error out.
+                tries += 1
+                if tries > self.retries:
+                    raise APIError('Unable to connect to Shodan')
+
+                time.sleep(tries)  # wait (1 second * retry number) before trying again
+                continue
+
+            # Automatically retry server errors and rate limiting - wait a bit longer on
+            # every attempt to give the API time to recover.
+            if data.status_code == 429 or data.status_code >= 500:
+                tries += 1
+                if tries <= self.retries:
+                    # If the API tells us exactly how long to wait (Retry-After) then
+                    # honor that - otherwise use a simple backoff strategy.
+                    delay = tries
+                    if data.status_code == 429:
+                        try:
+                            delay = max(int(data.headers.get('Retry-After', tries)), tries)
+                        except (TypeError, ValueError):
+                            pass
+                    time.sleep(delay)
+                    continue
+
+            break
 
         # Check that the API key wasn't rejected
         if data.status_code == 401:
@@ -389,6 +438,17 @@ class Shodan:
             raise APIError('Access denied (403 Forbidden)')
         elif data.status_code == 502:
             raise APIError('Bad Gateway (502)')
+        elif data.status_code == 429:
+            raise APIError('Rate limit exceeded (429 Too Many Requests)')
+
+        # For any other unexpected status code, try to surface the error message the API
+        # returned instead of failing with a generic JSON parse error.
+        if data.status_code != 200:
+            try:
+                error = data.json()['error']
+            except Exception:
+                error = 'The API returned an unexpected response (status code: {})'.format(data.status_code)
+            raise APIError(error)
 
         # Parse the text into JSON
         try:
@@ -445,6 +505,13 @@ class Shodan:
         and other features that are enabled for the current user's API plan.
         """
         return self._request('/api-info', {})
+
+    def account_profile(self):
+        """Returns the profile information for the account that the current API key belongs to.
+
+        :returns: A dictionary with the account's member, credits and display_name properties among others.
+        """
+        return self._request('/account/profile', {})
 
     def ports(self):
         """Get a list of ports that Shodan crawls
